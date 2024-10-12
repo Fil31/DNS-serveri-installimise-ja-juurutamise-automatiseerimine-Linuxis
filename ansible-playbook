@@ -1,0 +1,158 @@
+---
+- name: Install and configure DNS server on server1 including zones and logging
+  hosts: dns_servers
+  become: yes
+  tasks:
+    # Установка BIND9
+    - name: Install BIND9
+      apt:
+        name: bind9
+        state: present
+        update_cache: yes
+
+    # Настройка named.conf.options для общих параметров DNS
+    - name: Configure named.conf.options
+      copy:
+        dest: /etc/bind/named.conf.options
+        content: |
+          options {
+            directory "/var/cache/bind";
+            recursion yes;
+            allow-query { any; };
+            forwarders {
+              8.8.8.8;
+              8.8.4.4;
+            };
+            dnssec-validation auto;
+            listen-on { any; };
+          };
+
+    # Настройка прямой зоны
+    - name: Create forward zone file for example.local
+      copy:
+        dest: /etc/bind/db.example.local
+        content: |
+          ;
+          ; BIND data file for local domain
+          ;
+          $TTL    604800
+          @       IN      SOA     ns.example.local. root.example.local. (
+                                    2         ; Serial
+                               604800         ; Refresh
+                                86400         ; Retry
+                              2419200         ; Expire
+                               604800 )       ; Negative Cache TTL
+
+          ; Name servers
+          @       IN      NS      ns.example.local.
+
+          ; A records for name servers
+          ns      IN      A       192.168.1.82
+
+          ; A records for other hosts
+          www     IN      A       192.168.1.82
+
+    # Добавление конфигурации прямой зоны в named.conf.local
+    - name: Add forward zone configuration to named.conf.local
+      lineinfile:
+        path: /etc/bind/named.conf.local
+        line: 'zone "example.local" { type master; file "/etc/bind/db.example.local"; };'
+        state: present
+
+    # Настройка обратной зоны
+    - name: Create reverse zone file for 192.168.1
+      copy:
+        dest: /etc/bind/db.192.168.1
+        content: |
+          ;
+          ; BIND reverse data file for local 192.168.1 network
+          ;
+          $TTL    604800
+          @       IN      SOA     ns.example.local. root.example.local. (
+                                    2         ; Serial
+                               604800         ; Refresh
+                                86400         ; Retry
+                              2419200         ; Expire
+                               604800 )       ; Negative Cache TTL
+
+          ; Name servers
+          @       IN      NS      ns.example.local.
+
+          ; PTR records
+          82      IN      PTR     ns.example.local.
+          82      IN      PTR     www.example.local.
+
+    # Добавление конфигурации обратной зоны в named.conf.local
+    - name: Add reverse zone configuration to named.conf.local
+      lineinfile:
+        path: /etc/bind/named.conf.local
+        line: 'zone "1.168.192.in-addr.arpa" { type master; file "/etc/bind/db.192.168.1"; };'
+        state: present
+
+    # Настройка журналирования для BIND
+    - name: Create logging configuration file for BIND
+      copy:
+        dest: /etc/bind/named.conf.logging
+        content: |
+          logging {
+              channel default_log {
+                  file "/var/log/bind9/default.log" versions 3 size 5m;
+                  severity info;
+                  print-time yes;
+                  print-severity yes;
+                  print-category yes;
+              };
+              category default { default_log; };
+          };
+
+    # Включение файла конфигурации журналирования в named.conf
+    - name: Include logging configuration in named.conf
+      lineinfile:
+        path: /etc/bind/named.conf
+        line: 'include "/etc/bind/named.conf.logging";'
+        state: present
+
+    # Создание каталога для логов BIND и назначение прав
+    - name: Create directory for BIND logs
+      file:
+        path: /var/log/bind9
+        state: directory
+        owner: bind
+        group: bind
+        mode: '0755'
+
+    # Создание пустого файла для логов BIND и назначение прав
+    - name: Create empty log file for BIND
+      file:
+        path: /var/log/bind9/default.log
+        state: touch
+        owner: bind
+        group: bind
+        mode: '0644'
+
+    # Проверка синтаксиса конфигурационных файлов BIND перед запуском
+    - name: Check BIND configuration syntax
+      command: named-checkconf
+      register: checkconf_result
+      failed_when: checkconf_result.rc != 0
+      changed_when: false
+
+    # Проверка синтаксиса файла прямой зоны
+    - name: Check forward zone file syntax
+      command: named-checkzone example.local /etc/bind/db.example.local
+      register: checkzone_result
+      failed_when: checkzone_result.rc != 0
+      changed_when: false
+
+    # Проверка синтаксиса файла обратной зоны
+    - name: Check reverse zone file syntax
+      command: named-checkzone 1.168.192.in-addr.arpa /etc/bind/db.192.168.1
+      register: checkreverse_result
+      failed_when: checkreverse_result.rc != 0
+      changed_when: false
+
+    # Перезапуск службы BIND9
+    - name: Restart BIND9 service
+      service:
+        name: bind9
+        state: restarted
